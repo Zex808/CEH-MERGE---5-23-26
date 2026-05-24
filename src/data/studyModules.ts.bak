@@ -1,0 +1,282 @@
+import { StudyModule } from '../types';
+
+export const studyModules: StudyModule[] = [
+  {
+    id: "rpc-orchestration",
+    title: "Metasploit RPC Orchestration",
+    keywords: ['metasploit', 'rpc', 'msfrpcd', 'automation'],
+    theory: "Metasploit RPC (msfrpcd) allows automated, programmatic interaction with the Metasploit framework over HTTP/MessagePack. This orchestration is used to automate widespread vulnerability validation, integrate with SIEMs, or build custom attack wrappers. By interacting over RPC, an operator can spawn consoles, deploy modules, and process sessions without interacting with the msfconsole GUI.",
+    commands: [
+      { 
+        description: "Start MSF RPC Server", 
+        cmd: "msfrpcd -P SuP3rS3cret -n -f -S -a 127.0.0.1 -p 55552",
+        output: "[*] XMLRPC starting on 127.0.0.1:55552 (SSL): false...\n[*] MSGRPC starting on 127.0.0.1:55552 (SSL): false..."
+      }
+    ],
+    codeSnippet: {
+      language: "python",
+      code: `import msgpack
+import http.client
+from typing import Any, Dict
+
+def msfrpc_login(host: str, port: int, password: str) -> str:
+    """
+    Authenticates to the Metasploit RPC server and returns a token.
+    Raises ConnectionError if the login fails.
+    """
+    headers: Dict[str, str] = {"Content-type": "binary/message-pack"}
+    payload: bytes = msgpack.packb(["auth.login", "msf", password])
+    
+    try:
+        conn = http.client.HTTPConnection(host, port)
+        conn.request("POST", "/api/1.0/", payload, headers)
+        response = conn.getresponse()
+        data: Dict[str, Any] = msgpack.unpackb(response.read())
+        
+        if b"result" in data and data[b"result"] == b"success":
+            return data[b"token"].decode("utf-8")
+        else:
+            raise PermissionError("RPC Authentication failed.")
+    except Exception as e:
+        raise ConnectionError(f"Failed to connect to MSF RPC: {e}")
+`
+    },
+    labSetup: "Target: Windows Server VM (172.20.0.10). Attacker: Kali Linux VM. Run msfrpcd on the Kali loopback interface and test the Python connection script.",
+    defense: "Detection Method: Monitor for unusual long-lived TCP connections to RPC ports (e.g., 55552/55553). Prevention: Bind RPC strictly to 127.0.0.1 or an administrative VLAN. Enforce TLS and complex passwords. SIEM Rule: Alert on processes executing `msfrpcd` with weak or missing password flags.",
+    cehMap: "Domain 4: System Hacking - Penetration Testing Frameworks. Objective: Explaining and utilizing automated exploitation frameworks.",
+    practice: "Build a Python script that connects to the RPC, initiates an Nmap scan module via MSF, and prints the identified open ports from the RPC job output."
+  },
+  {
+    id: "hash-wrappers",
+    title: "Hydra & Hashcat Wrappers",
+    keywords: ['hydra', 'hashcat', 'password', 'cracking', 'wrapper'],
+    theory: "Hydra is an online parallelized login cracker, while Hashcat is an offline password recovery tool utilizing GPU acceleration (OpenCL/CUDA). Wrappers are custom scripts built around these tools to parse output, feed dynamic wordlists, and orchestrate distributed cracking sessions. Online cracking interacts with active protocols (SSH, HTTP), creating network noise; offline cracking analyzes obtained hashes on local hardware.",
+    commands: [
+      { description: "Hydra SSH brute force (Dummy Target)", cmd: "hydra -L users.txt -P rockyou.txt ssh://127.0.0.1 -t 4" },
+      { description: "Hashcat NTLM offline (Dummy Hash)", cmd: "hashcat -a 0 -m 1000 dummy_hash.txt rockyou.txt --potfile-disable" }
+    ],
+    codeSnippet: {
+      language: "python",
+      code: `import subprocess
+import logging
+from typing import List, Optional
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def run_hashcat(hash_file: str, wordlist: str, hash_type: int) -> Optional[str]:
+    """
+    Executes Hashcat against a target hash file.
+    Always uses shell=False to prevent command injection vulnerabilities.
+    """
+    command: List[str] = [
+        "hashcat",
+        "-a", "0",                  # Dictionary attack
+        "-m", str(hash_type),       # Hash format (e.g., 1000 for NTLM)
+        hash_file,
+        wordlist,
+        "--potfile-disable",        # For repeated lab testing
+        "--quiet"
+    ]
+    
+    try:
+        logging.info(f"Starting offline cracking on {hash_file}")
+        result = subprocess.run(command, shell=False, capture_output=True, text=True, check=False)
+        
+        if result.returncode in [0, 1]:
+            return result.stdout
+        else:
+            logging.error(f"Hashcat execution failed: {result.stderr}")
+            return None
+    except FileNotFoundError:
+        logging.error("Hashcat binary not found. Ensure it is installed and in PATH.")
+        return None
+`
+    },
+    labSetup: "Target: Weak SSH credentials on Linux VM (172.20.0.15) and a sample NTLM hash dump in `ntds.txt`. Run the Hashcat wrapper on the NTLM file to extract plaintext.",
+    defense: "Detection Method: Detect high volumes of failed authentication attempts via Syslog/Event ID 4625. Prevention Config: Implement account lockout policies (e.g., 5 attempts), enable Fail2Ban, enforce Multi-Factor Authentication (MFA). Offline defense requires strong hashing algorithms (Argon2, bcrypt).",
+    cehMap: "Domain 4: System Hacking - Cracking Passwords. Objective: Understand online and offline password cracking techniques and countermeasures.",
+    practice: "Extend the wrapper to parse the stdout and return a dictionary of {hash: plaintext_password} by reading Hashcat's output structure."
+  },
+  {
+    id: "cve-scaffold",
+    title: "Exploit Scaffold Generator (CVE)",
+    keywords: ['cve', 'scaffold', 'sandbox', 'docker', 'execution', 'testing'],
+    theory: "When evaluating a CVE scanner or scaffold, it must be executed in a restricted sandbox to prevent unintended network spread and system contamination. Docker provides isolated environments (namespaces, cgroups). An air-gapped dummy target container ensures the scaffold runs locally without reaching out to external networks.",
+    commands: [
+      { description: "Start dummy target container (Isolated)", cmd: "docker run -d --name dummy-target -p 127.0.0.1:8080:80 nginx:alpine" },
+      { 
+        description: "Run exploit scaffold safely against dummy", 
+        cmd: "docker run --rm --network container:dummy-target --cap-drop=ALL python:3.9-slim python scaffold.py http://127.0.0.1:8080",
+        output: "{\n  \"status\": \"vulnerable\",\n  \"target\": \"http://127.0.0.1:8080\",\n  \"details\": \"Reflection signature detected\"\n}"
+      },
+      { description: "Cleanup dummy target", cmd: "docker rm -f dummy-target" }
+    ],
+    codeSnippet: {
+      language: "python",
+      code: `import subprocess
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+def run_isolated_scaffold(scaffold_script: str, dummy_image: str = "nginx:alpine"):
+    """
+    Spawns a dummy target, runs the exploit scaffold in a tightly constrained 
+    sandbox, captures output, and ensures cleanup.
+    """
+    logging.info("Starting dummy target container...")
+    try:
+        subprocess.run(["docker", "run", "-d", "--name", "dummy_target", dummy_image], check=True, shell=False)
+
+        logging.info("Executing scaffold against dummy target...")
+        scaffold_cmd = [
+            "docker", "run", "--rm", 
+            "--network", "container:dummy_target",
+            "--cap-drop=ALL",          # Drop all capabilities
+            "--read-only",             # Read-only filesystem
+            "--memory=128m",           # Limit memory
+            "-v", f"{scaffold_script}:/app/scaffold.py:ro",
+            "python:3.9-slim", 
+            "python", "/app/scaffold.py", "http://127.0.0.1:80"
+        ]
+        
+        result = subprocess.run(scaffold_cmd, capture_output=True, text=True, timeout=10, shell=False)
+        logging.info(f"Scaffold Output:\\n{result.stdout}")
+        
+    except subprocess.TimeoutExpired:
+        logging.error("Scaffold execution timed out.")
+    except Exception as e:
+        logging.error(f"Error during sandbox execution: {e}")
+    finally:
+        logging.info("Cleaning up dummy target...")
+        subprocess.run(["docker", "rm", "-f", "dummy_target"], shell=False, check=False, capture_output=True)
+`
+    },
+    labSetup: "Target: Local Docker daemon. Create an isolated Docker network without internet access. Run the Python runner to securely test the CVE scaffold against a verified dummy web server locally.",
+    defense: "Ensure containers in testing environments are strictly air-gapped, run without privileges (--cap-drop=ALL), and have no host mounts. Disable outgoing networking for sandboxed apps.",
+    cehMap: "Domain 3: Vulnerability Analysis. Objective: Vulnerability Assessment methodologies and identifying security flaws.",
+    practice: "Modify the scaffold to accept a list of targets from a file, utilize a thread pool to scan them concurrently, and log results to a CSV."
+  },
+  {
+    id: "post-exploitation",
+    title: "Post-Exploitation & Lateral Movement",
+    keywords: ['post-exploitation', 'persistence', 'scheduled tasks', 'schtasks', 'windows'],
+    theory: "Persistence techniques like Scheduled Tasks allow a process to restart automatically. In a defensive lab, we analyze benign scheduled task creation to study forensic footprints (Event Viewer, Registry). Validating inputs through an allowlist prevents unintended task execution.",
+    commands: [
+      { 
+        description: "Create benign task (Notepad)", 
+        cmd: "schtasks /create /tn \"LabSysUpdate\" /tr \"notepad.exe\" /sc onstart /ru SYSTEM",
+        output: "SUCCESS: The scheduled task \"LabSysUpdate\" has successfully been created."
+      },
+      { description: "Query the created task", cmd: "schtasks /query /tn \"LabSysUpdate\" /fo list" },
+      { description: "Delete the task to clean up", cmd: "schtasks /delete /tn \"LabSysUpdate\" /f" }
+    ],
+    codeSnippet: {
+      language: "python",
+      code: `import subprocess
+import logging
+from typing import List
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+# Explicit allowlist of benign binaries
+ALLOWED_BINARIES = ["notepad.exe", "calc.exe", "ping.exe"]
+
+def manage_benign_task(task_name: str, binary: str, action: str = "create") -> bool:
+    """
+    Safely creates, queries, or deletes a scheduled task using an allowlist.
+    """
+    if binary not in ALLOWED_BINARIES:
+        logging.error(f"Binary {binary} not allowed. Lab safety constraint.")
+        return False
+
+    cmd: List[str] = []
+    if action == "create":
+        cmd = ["schtasks", "/create", "/tn", task_name, "/tr", binary, "/sc", "daily", "/st", "12:00"]
+    elif action == "delete":
+        cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
+    elif action == "query":
+        cmd = ["schtasks", "/query", "/tn", task_name, "/fo", "list"]
+    else:
+        return False
+
+    logging.info(f"Dry Run (Command to run): {' '.join(cmd)}")
+    
+    # Active testing disabled for strictly benign static lab module
+    # result = subprocess.run(cmd, shell=False, capture_output=True, text=True)
+    # logging.info(result.stdout)
+    return True
+`
+    },
+    labSetup: "Target: Windows AD Lab VM. Analyze Sysmon Event ID 1 for 'schtasks' creating 'notepad.exe'. Clean up immediately.",
+    defense: "Monitor Event ID 4698 (A scheduled task was created) for any unexpected binaries or tasks running as SYSTEM. Establish an explicit allowlist of known administrative tasks. Avoid allowing standard users to register tasks.",
+    cehMap: "Domain 4: System Hacking - Maintaining Access & Hiding Files. Objective: Post-exploitation techniques and evasion of defenses.",
+    practice: "Configure an ELK or Splunk instance in the lab. Execute the `wevtutil` command and write a custom SIEM detection rule (e.g., using Sigma) to catch it."
+  },
+  {
+    id: "wireless-attacks",
+    title: "Wireless Attacks & Auditing",
+    keywords: ['wireless', 'wifi', 'wpa2', 'handshake', 'wireshark', 'eapol', 'pcap'],
+    theory: "Wireless auditing involves capturing and reviewing the 4-way WPA2 EAPOL handshake. The handshake negotiates the PTK (Pairwise Transient Key) using the AP's ANonce and the Client's SNonce, along with a MIC (Message Integrity Code) to verify possession of the PMK. We review this statically in Wireshark safely, strictly filtering for EAPOL.",
+    commands: [
+      { description: "Filter Wireshark for EAPOL packets", cmd: "eapol" },
+      { description: "Filter specifically for EAPOL Key message 1 (ANonce)", cmd: "wlan_rsna_eapol.keydes.msgnr == 1" },
+      { 
+        description: "Count EAPOL packets in capture via tshark", 
+        cmd: "tshark -r capture.cap -Y \"eapol\" -T fields -e wlan.sa -e wlan.da | sort | uniq -c",
+        output: "      4 00:11:22:33:44:55\tAA:BB:CC:DD:EE:FF\n      2 00:11:22:33:44:55\t11:22:33:44:55:66"
+      }
+    ],
+    codeSnippet: {
+      language: "python",
+      code: `import subprocess
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+def summarize_eapol(pcap_file: str):
+    """
+    Parses a .cap file for WPA2 4-way handshakes.
+    Summarizes source/destination MAC addresses associated with EAPOL frames.
+    No cracking performed. Safe lab operations.
+    """
+    logging.info(f"Analyzing {pcap_file} for EAPOL frames...")
+    
+    tshark_cmd = [
+        "tshark", "-r", pcap_file, 
+        "-Y", "eapol", 
+        "-T", "fields", 
+        "-e", "wlan.sa", 
+        "-e", "wlan.da"
+    ]
+    
+    try:
+        result = subprocess.run(tshark_cmd, shell=False, capture_output=True, text=True, check=True)
+        lines = result.stdout.strip().split('\\n')
+        
+        eapol_count = 0
+        pairs = set()
+        
+        for line in lines:
+            if line:
+                sa, da = line.split('\\t')
+                pairs.add((sa, da))
+                eapol_count += 1
+                
+        logging.info(f"Total EAPOL frames identified: {eapol_count}")
+        logging.info("Unique SA/DA pairs involved in handshake:")
+        for sa, da in pairs:
+            logging.info(f"  Src: {sa} -> Dst: {da}")
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to parse pcap: {e}")
+    except FileNotFoundError:
+        logging.error("tshark binary not found. Please install wireshark-cli.")
+`
+    },
+    labSetup: "Target: Authorized Local VM running Wireshark/tshark. Use a benign `.cap` file containing a sample 4-way handshake. Do not actively deauth networks.",
+    defense: "Preventing handshake capture actively is difficult, as management (deauth) frames are often unencrypted. Enable 802.11w (Management Frame Protection) where supported to mitigate deauthentication spam, and use WPA3, which replaces the PSK 4-way handshake with SAE (Simultaneous Authentication of Equals) to prevent offline dictionary attacks.",
+    cehMap: "Domain 9: Hacking Wireless Networks. Objective: Wireless encryption protocols, attacks, and countermeasures.",
+    practice: "Capture a 4-way handshake using the aircrack-ng suite, isolate the EAPOL packets in Wireshark to understand the frame structure, and attempt to run Hashcat against it."
+  }
+];
+
